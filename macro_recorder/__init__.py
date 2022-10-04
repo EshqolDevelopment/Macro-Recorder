@@ -1,224 +1,131 @@
-from pynput.mouse import Controller, Listener, Button
-from pynput.keyboard import Key, Controller as KeyboardController, Listener as KeyboardListener
-import time, threading, json
-
+import time, json, keyboard, mouse
+from macro_recorder.thread import thread
+from threading import Thread
 
 
 class Recorder:
 
     def __init__(self, recorded: dict = None, round_to: int = 5):
-        self.mouse = Controller()
-        self.keyboard = KeyboardController()
-
-        self.listener = Listener(on_click=self.on_click, on_move=self.on_move, on_scroll=self.on_scroll)
-        self.keyboard_listener = KeyboardListener(on_press=lambda *args: self.on_press(*args), on_release=lambda *args: self.on_press(*args, press=False))
-
         self.start_time = None
         self.stop = False
         self.play_start_time = None
         self.round_to = round_to
         self.is_playing = False
+        self.speed_factor = 1
 
         self.recorded = recorded if recorded else {
-            'move': [],
-            'click': [],
-            'scroll': [],
-            'keyboard': []
+            'keyboard': [],
+            'mouse': []
         }
-        self.keyboard_to_run()
 
-    def record(self, length: int = None):
-        self.start_time = time.time()
-        self.listener.start()
-        self.keyboard_listener.start()
+    def record(self, countdown: float = 0.01, stop_key: str = 'esc'):
+        self.start_time = time.time() + countdown
+        self.mouse_listener()
+        self.keyboard_listener(stop_key=stop_key)
 
-        if length:
-            while time.time() - self.start_time < length:
-                pass
-
-            self.stop_recording()
-
-    def play(self, wait: bool = True, countdown: float = 0.3):
-        threads = [threading.Thread(target=self.play_moves, args=(self.recorded['move'],)),
-                   threading.Thread(target=self.play_clicks, args=(self.recorded['click'],)),
-                   threading.Thread(target=self.play_scrolls, args=(self.recorded['scroll'],)),
-                   threading.Thread(target=self.play_keyboard, args=(self.recorded['keyboard'],))]
+    def play(self, countdown: float = 0.3, speed_factor: float = 1):
+        threads = [
+            Thread(target=self.play_mouse, args=(self.recorded['mouse'],)),
+            Thread(target=self.play_keyboard, args=(self.recorded['keyboard'],))
+        ]
 
         self.is_playing = True
+        self.speed_factor = speed_factor
         self.play_start_time = time.time() + countdown
 
-        for thread in threads:
-            thread.start()
+        for t in threads:
+            t.start()
 
-        for thread in threads:
-            thread.join()
+        for t in threads:
+            t.join()
 
         self.is_playing = False
 
-        if wait:
-            self.wait_while_playing()
-
     def save(self, path: str):
         with open(path, 'w') as f:
-            self.keyboard_to_json()
             json.dump(self.recorded, f, indent=4)
 
     def load(self, path: str):
         with open(path, 'r') as f:
             self.recorded = json.load(f)
-            self.keyboard_to_run()
 
-    def keyboard_to_run(self):
-        keyboard = self.recorded['keyboard']
+    def keyboard_listener(self, stop_key: str):
+        while True:
+            event: keyboard.KeyboardEvent = keyboard.read_event()
 
-        for i in range(len(keyboard)):
-            key, pressed, t = keyboard[i]
-            print(key)
-            key = self.get_key(key)
-            keyboard[i] = [key, pressed, t]
+            if self.stop:
+                break
 
-        self.recorded['keyboard'] = keyboard
+            if event.name == stop_key:
+                self.stop_recording()
+                break
 
-    def keyboard_to_json(self):
-        keyboard = self.recorded['keyboard']
+            self.recorded['keyboard'].append(
+                [event.event_type == 'down', event.scan_code, event.time - self.start_time])
 
-        for i in range(len(keyboard)):
-            key, pressed, t = keyboard[i]
+    @thread
+    def mouse_listener(self):
+        mouse.hook(self.on_callback)
 
-            if hasattr(key, '_name_'):
-                keyboard[i] = [key._name_, pressed, t]
+    def on_callback(self, event):
+        if isinstance(event, mouse.MoveEvent):
+            self.recorded['mouse'].append(['move', event.x, event.y, event.time - self.start_time])
 
-            else:
-                keyboard[i] = [key.char, pressed, t]
+        elif isinstance(event, mouse.ButtonEvent):
+            self.recorded['mouse'].append(
+                ['click', event.button, event.event_type == 'down', event.time - self.start_time])
 
-        self.recorded['keyboard'] = keyboard
+        elif isinstance(event, mouse.WheelEvent):
+            self.recorded['mouse'].append(['scroll', event.delta, event.time - self.start_time])
 
-    def wait_while_playing(self):
-        while self.is_playing:
-            time.sleep(0.03)
-
-    def on_click(self, x, y, button: Button, pressed):
-        self.recorded['click'].append([x, y, [button._value_, button._name_], pressed, time.time() - self.start_time])
-
-    def on_move(self, x, y):
-        self.recorded['move'].append([x, y, time.time() - self.start_time])
-
-    def on_scroll(self, x, y, dx, dy):
-        self.recorded['scroll'].append([x, y, dx, dy, time.time() - self.start_time])
-
-    def on_press(self, key: Key, press: bool = True):
-        self.recorded['keyboard'].append([key, press, time.time() - self.start_time])
+        else:
+            print('Unknown event:', event)
 
     def stop_recording(self):
-        self.listener.stop()
-        self.keyboard_listener.stop()
+        mouse.unhook(self.on_callback)
         self.stop = True
 
         time.sleep(0.1)
 
         return self.recorded
 
-    def play_moves(self, moves: list):
+    def play_keyboard(self, key_events: list):
         self.wait_to_start()
 
-        for move in moves:
-            x, y, t = move
-            while time.time() - self.play_start_time < t:
-                pass
-
-            self.mouse.position = (x, y)
-
-    def play_clicks(self, clicks: list):
-        self.wait_to_start()
-
-        for click in clicks:
-            x, y, button, pressed, t = click
-            while time.time() - self.play_start_time < t:
-                pass
-
-            my_button = Button.left if button[1] == 'left' else Button.right
+        for key in key_events:
+            pressed, scan_code, t = key
+            self.sleep(t / self.speed_factor)
 
             if pressed:
-                self.mouse.press(my_button)
-            else:
-                self.mouse.release(my_button)
+                keyboard.send(scan_code, do_press=pressed, do_release=not pressed)
 
-    def play_scrolls(self, scrolls: list):
+    def play_mouse(self, mouse_events: list):
         self.wait_to_start()
 
-        for scroll in scrolls:
-            x, y, dx, dy, t = scroll
-            while time.time() - self.play_start_time < t:
-                pass
+        for mouse_event in mouse_events:
+            event_type, *args, t = mouse_event
+            self.sleep(t / self.speed_factor)
 
-            self.mouse.scroll(dx, dy)
-            
-    def play_keyboard(self, keyboard: list):
-        self.wait_to_start()
+            if event_type == 'move':
+                mouse.move(*args)
 
-        for key in keyboard:
-            key, pressed, t = key
-            while time.time() - self.play_start_time < t:
-                pass
+            elif event_type == 'click':
+                if args[1]:
+                    mouse.press(args[0])
 
-            if pressed:
-                self.keyboard.press(key)
+                else:
+                    mouse.release(args[0])
 
-            else:
-                self.keyboard.release(key)
+            elif event_type == 'scroll':
+                mouse.wheel(args[0])
 
-    @staticmethod
-    def get_key(key: str):
-        key = key.lower()
-        key_map = {
-            'ctrl': Key.ctrl,
-            'alt': Key.alt,
-            'shift': Key.shift,
-            'esc': Key.esc,
-            'enter': Key.enter,
-            'backspace': Key.backspace,
-            'tab': Key.tab,
-            'caps_lock': Key.caps_lock,
-            'space': Key.space,
-            'page_up': Key.page_up,
-            'page_down': Key.page_down,
-            'end': Key.end,
-            'home': Key.home,
-            'left': Key.left,
-            'up': Key.up,
-            'right': Key.right,
-            'down': Key.down,
-            'delete': Key.delete,
-            'cmd': Key.cmd,
-            'cmd_r': Key.cmd_r,
-            'f1': Key.f1,
-            'f2': Key.f2,
-            'f3': Key.f3,
-            'f4': Key.f4,
-            'f5': Key.f5,
-            'f6': Key.f6,
-            'f7': Key.f7,
-            'f8': Key.f8,
-            'f9': Key.f9,
-            'f10': Key.f10,
-            'f11': Key.f11,
-            'f12': Key.f12,
-            'f13': Key.f13,
-            'f14': Key.f14,
-            'f15': Key.f15,
-            'f16': Key.f16,
-            'f17': Key.f17,
-            'f18': Key.f18,
-            'f19': Key.f19,
-            'f20': Key.f20,
-        }
-
-        try:
-            return key_map[key]
-
-        except KeyError:
-            return key
-    
     def wait_to_start(self):
         while time.time() < self.play_start_time:
             pass
+
+    def sleep(self, t: float):
+        while time.time() - self.play_start_time < t:
+            time.sleep(0)
+
+
+
