@@ -3,6 +3,9 @@ from macro_recorder.thread import thread
 from threading import Thread
 
 
+__version__ = '1.0.0'
+
+
 class Recorder:
 
     def __init__(self, recorded: dict = None, stop_key: str = 'esc'):
