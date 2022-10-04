@@ -30,7 +30,7 @@ class Recorder:
         ]
 
         self.is_playing = True
-        self.speed_factor = speed_factor
+        self.speed_factor = 1
         self.play_start_time = time.time() + countdown
 
         for t in threads:
